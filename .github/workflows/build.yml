@@ -7,6 +7,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   build:
     runs-on: macos-latest
@@ -16,13 +19,6 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-      with:
-        node-version: '24'
-    
-    - name: Set up Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '24'
 
     - name: Install Xcode
       run: |
@@ -60,15 +56,10 @@ jobs:
           NoUpdateChecker.m \
           -undefined dynamic_lookup
 
-    - name: Combine universal dylib (Optional - needs lipo)
+    - name: Combine universal dylib
       run: |
-        if command -v lipo &> /dev/null; then
-          lipo -create build/NoUpdateChecker-arm64.dylib build/NoUpdateChecker-x86_64.dylib -output build/NoUpdateChecker.dylib
-          echo "✅ Universal dylib created"
-        else
-          cp build/NoUpdateChecker-arm64.dylib build/NoUpdateChecker.dylib
-          echo "⚠️ Using arm64 dylib only"
-        fi
+        lipo -create build/NoUpdateChecker-arm64.dylib build/NoUpdateChecker-x86_64.dylib -output build/NoUpdateChecker.dylib
+        echo "✅ Universal dylib created"
 
     - name: List build output
       run: ls -lh build/
@@ -79,12 +70,3 @@ jobs:
         name: NoUpdateChecker
         path: build/NoUpdateChecker*.dylib
         retention-days: 30
-
-    - name: Upload release asset
-      uses: softprops/action-gh-release@v1
-      if: startsWith(github.ref, 'refs/tags/')
-      with:
-        files: build/NoUpdateChecker*.dylib
-        draft: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
