@@ -1,151 +1,210 @@
 /*
- * NoUpdateChecker.dylib
- * 阻止 iOS App 檢查更新
+ * NoUpdateChecker.m
+ * 阻止 iOS App 檢查更新 - 標準 Objective-C 版本
  * 
- * 使用方法：
- * 1. 編譯成 .dylib
- * 2. 通過 Frida 注入或越獄環境加載
+ * 使用方法：直接編譯成 .dylib
+ * 
+ * 編譯命令：
+ * xcrun clang -dynamiclib -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+ *   -fobjc-arc -framework Foundation -framework UIKit -framework StoreKit \
+ *   -o NoUpdateChecker.dylib NoUpdateChecker.m -undefined dynamic_lookup
  */
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <StoreKit/StoreKit.h>
+#import <objc/runtime.h>
 
 // ============================================================
-// 方法 1: Hook NSBundle - 阻止獲取更新資訊
+// 輔助函數：交換方法實現
 // ============================================================
 
-%hook NSBundle
-
-- (NSDictionary *)infoDictionary {
-    NSDictionary *original = %orig;
+static void swizzleMethod(Class class, SEL originalSelector, SEL swizzledSelector) {
+    Method originalMethod = class_getInstanceMethod(class, originalSelector);
+    Method swizzledMethod = class_getInstanceMethod(class, swizzledSelector);
     
-    // 移除 App Store 更新相關的鍵
-    NSMutableDictionary *modified = [original mutableCopy];
-    
-    // 移除更新檢查相關的 key
-    [modified removeObjectForKey:@"NSAppTransportSecurity"];
-    [modified removeObjectForKey:@"UIAppFonts"];
-    
-    return modified;
-}
-
-%end
-
-// ============================================================
-// 方法 2: Hook UIApplication - 阻止更新彈窗
-// ============================================================
-
-%hook UIApplication
-
-- (BOOL)openURL:(NSURL *)url options:(NSDictionary<UIApplicationOpenURLOptionsKey,id> *)options 
-    completionHandler:(void (^)(BOOL))completion {
-    
-    // 攔截 App Store 連結
-    if ([url.absoluteString containsString:@"itunes.apple.com"] ||
-        [url.absoluteString containsString:@"apps.apple.com"] ||
-        [url.absoluteString containsString:@"itms-apps"]) {
-        
-        NSLog(@"[NoUpdate] Blocked App Store URL: %@", url.absoluteString);
-        
-        if (completion) {
-            completion(NO);
-        }
-        return YES; // 返回 YES 表示已處理，不進行實際打開
+    if (class_addMethod(class, originalSelector, method_getImplementation(swizzledMethod), method_getTypeEncoding(swizzledMethod))) {
+        class_replaceMethod(class, swizzledSelector, method_getImplementation(originalMethod), method_getTypeEncoding(originalMethod));
+    } else {
+        method_exchangeImplementations(originalMethod, swizzledMethod);
     }
-    
-    return %orig(url, options, completion);
 }
 
-%end
-
 // ============================================================
-// 方法 3: Hook NSUserDefaults - 阻止 App Store 檢查
+// 1. Hook NSURLSession - 阻擋 App Store API 請求
 // ============================================================
 
-%hook NSUserDefaults
+@interface NSURLSession (NoUpdateChecker)
+- (NSURLSessionDataTask *)noUpdate_dataTaskWithRequest:(NSURLRequest *)request 
+                                     completionHandler:(void (^)(NSData * _Nullable, NSURLResponse * _Nullable, NSError * _Nullable))completionHandler;
+@end
 
-- (id)objectForKey:(NSString *)defaultName {
-    // 阻止 Store 相關的 Key
-    if ([defaultName containsString:@"Store"] || 
-        [defaultName containsString:@"kSStore"] ||
-        [defaultName containsString:@"com.apple.AppStore"]) {
-        
-        NSLog(@"[NoUpdate] Blocked NSUserDefaults key: %@", defaultName);
-        return nil;
-    }
-    
-    return %orig(defaultName);
-}
+@implementation NSURLSession (NoUpdateChecker)
 
-%end
-
-// ============================================================
-// 方法 4: Hook NSURLSession - 阻擋 App Store API 請求
-// ============================================================
-
-%hook NSURLSession
-
-- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request 
-    completionHandler:(void (^)(NSData * _Nullable, NSURLResponse * _Nullable, NSError * _Nullable))completionHandler {
-    
+- (NSURLSessionDataTask *)noUpdate_dataTaskWithRequest:(NSURLRequest *)request 
+                                     completionHandler:(void (^)(NSData * _Nullable, NSURLResponse * _Nullable, NSError * _Nullable))completionHandler {
     NSString *url = request.URL.absoluteString;
     
     // 阻擋 Apple App Store API
     if ([url containsString:@"itunes.apple.com"] ||
         [url containsString:@"apps.apple.com"] ||
-        [url containsString:@"Buy"] ||
         [url containsString:@"lookup"] ||
-        [url containsString:@"softwareVersion"]) {
+        [url containsString:@"softwareVersion"] ||
+        [url containsString:@"Buy"] ||
+        [url containsString:@"sa"] ||
+        [url containsString:@"install"]) {
         
-        NSLog(@"[NoUpdate] Blocked App Store API: %@", url);
+        NSLog(@"[NoUpdate] Blocked: %@", url);
         
-        // 返回空響應
+        // 返回空的 404 響應
         NSData *emptyData = [NSData data];
-        NSURLResponse *emptyResponse = [[NSHTTPURLResponse alloc] 
-            initWithURL:request.URL 
-            statusCode:404 
-            HTTPVersion:@"1.1" 
-            headerFields:@{}];
+        NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc] initWithURL:request.URL
+                                                                  statusCode:404
+                                                                 HTTPVersion:@"1.1"
+                                                                headerFields:@{}];
         
-        completionHandler(emptyData, emptyResponse, nil);
-        
-        // 返回一個空任務
+        if (completionHandler) {
+            completionHandler(emptyData, response, nil);
+        }
         return nil;
     }
     
-    return %orig(request, completionHandler);
+    return [self noUpdate_dataTaskWithRequest:request completionHandler:completionHandler];
 }
 
-%end
+@end
 
 // ============================================================
-// 方法 5: Hook SKStoreProductViewController (如果有)
+// 2. Hook UIApplication - 阻止打開 App Store
 // ============================================================
 
-%hook SKStoreProductViewController
+@interface UIApplication (NoUpdateChecker)
+- (BOOL)noUpdate_openURL:(NSURL *)url options:(NSDictionary<UIApplicationOpenURLOptionsKey,id> *)options completionHandler:(void (^)(BOOL))completion;
+@end
 
-- (void)loadProductWithParameters:(NSDictionary<NSString *,id> *)parameters 
-    completionBlock:(void (^)(NSError * _Nullable))block {
+@implementation UIApplication (NoUpdateChecker)
+
+- (BOOL)noUpdate_openURL:(NSURL *)url options:(NSDictionary<UIApplicationOpenURLOptionsKey,id> *)options completionHandler:(void (^)(BOOL))completion {
+    NSString *urlStr = url.absoluteString;
     
+    // 攔截 App Store 連結
+    if ([urlStr containsString:@"itunes.apple.com"] ||
+        [urlStr containsString:@"apps.apple.com"] ||
+        [urlStr containsString:@"itms-apps"] ||
+        [urlStr containsString:@"itms-services"]) {
+        
+        NSLog(@"[NoUpdate] Blocked URL: %@", urlStr);
+        
+        if (completion) {
+            completion(NO);
+        }
+        return YES;
+    }
+    
+    return [self noUpdate_openURL:url options:options completionHandler:completion];
+}
+
+@end
+
+// ============================================================
+// 3. Hook SKStoreProductViewController
+// ============================================================
+
+@interface SKStoreProductViewController (NoUpdateChecker)
+- (void)noUpdate_loadProductWithParameters:(NSDictionary<NSString *,id> *)parameters completionBlock:(void (^)(NSError * _Nullable))block;
+@end
+
+@implementation SKStoreProductViewController (NoUpdateChecker)
+
+- (void)noUpdate_loadProductWithParameters:(NSDictionary<NSString *,id> *)parameters completionBlock:(void (^)(NSError * _Nullable))block {
     NSLog(@"[NoUpdate] Blocked SKStoreProductViewController load");
     
-    // 返回錯誤阻止加載
-    NSError *error = [NSError errorWithDomain:@"NoUpdateChecker" 
-                                         code:404 
-                                     userInfo:@{NSLocalizedDescriptionKey: @"Update blocked"}];
     if (block) {
+        NSError *error = [NSError errorWithDomain:@"NoUpdateChecker" 
+                                             code:404 
+                                         userInfo:@{NSLocalizedDescriptionKey: @"Update blocked"}];
         block(error);
     }
-    return;
 }
 
-%end
+@end
 
 // ============================================================
-// 初始化
+// 4. Hook NSUserDefaults
 // ============================================================
 
-%ctor {
-    NSLog(@"[NoUpdateChecker] Loaded - Update checks disabled");
-    NSLog(@"[NoUpdateChecker] This tweak blocks iOS app update checks");
+@interface NSUserDefaults (NoUpdateChecker)
+- (id)noUpdate_objectForKey:(NSString *)defaultName;
+@end
+
+@implementation NSUserDefaults (NoUpdateChecker)
+
+- (id)noUpdate_objectForKey:(NSString *)defaultName {
+    // 阻止 Store 相關的 Key
+    if ([defaultName containsString:@"Store"] || 
+        [defaultName containsString:@"kSStore"] ||
+        [defaultName containsString:@"com.apple.AppStore"] ||
+        [defaultName containsString:@"com.apple.MobileStore"]) {
+        
+        NSLog(@"[NoUpdate] Blocked NSUserDefaults key: %@", defaultName);
+        return nil;
+    }
+    
+    return [self noUpdate_objectForKey:defaultName];
+}
+
+@end
+
+// ============================================================
+// 5. Hook NSBundle
+// ============================================================
+
+@interface NSBundle (NoUpdateChecker)
+- (NSDictionary *)noUpdate_infoDictionary;
+@end
+
+@implementation NSBundle (NoUpdateChecker)
+
+- (NSDictionary *)noUpdate_infoDictionary {
+    NSDictionary *original = [self noUpdate_infoDictionary];
+    NSLog(@"[NoUpdate] infoDictionary accessed");
+    return original;
+}
+
+@end
+
+// ============================================================
+// 初始化 - 註冊所有 Hook
+// ============================================================
+
+__attribute__((constructor))
+static void NoUpdateCheckerInit(void) {
+    NSLog(@"[NoUpdateChecker] Loading...");
+    
+    // Hook NSURLSession
+    swizzleMethod([NSURLSession class], 
+                  @selector(dataTaskWithRequest:completionHandler:), 
+                  @selector(noUpdate_dataTaskWithRequest:completionHandler:));
+    
+    // Hook UIApplication
+    swizzleMethod([UIApplication class], 
+                  @selector(openURL:options:completionHandler:), 
+                  @selector(noUpdate_openURL:options:completionHandler:));
+    
+    // Hook SKStoreProductViewController
+    swizzleMethod([SKStoreProductViewController class], 
+                  @selector(loadProductWithParameters:completionBlock:), 
+                  @selector(noUpdate_loadProductWithParameters:completionBlock:));
+    
+    // Hook NSUserDefaults
+    swizzleMethod([NSUserDefaults class], 
+                  @selector(objectForKey:), 
+                  @selector(noUpdate_objectForKey:));
+    
+    // Hook NSBundle
+    swizzleMethod([NSBundle class], 
+                  @selector(infoDictionary), 
+                  @selector(noUpdate_infoDictionary));
+    
+    NSLog(@"[NoUpdateChecker] Loaded - Update checks disabled!");
 }
