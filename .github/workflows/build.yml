@@ -28,12 +28,18 @@ jobs:
     - name: Create build directory
       run: mkdir -p build
 
+    - name: Get SDK paths
+      run: |
+        IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+        SIM_SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+        echo "iOS SDK: $IOS_SDK"
+        echo "Simulator SDK: $SIM_SDK"
+
     - name: Compile dylib (arm64 - iOS Device)
       run: |
-        clang -dynamiclib \
+        xcrun clang -dynamiclib \
           -arch arm64 \
           -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-          -target-ios-version-min 12.0 \
           -fobjc-arc \
           -framework Foundation \
           -framework UIKit \
@@ -44,10 +50,9 @@ jobs:
 
     - name: Compile dylib (x86_64 - iOS Simulator)
       run: |
-        clang -dynamiclib \
+        xcrun clang -dynamiclib \
           -arch x86_64 \
           -isysroot $(xcrun --sdk iphonesimulator --show-sdk-path) \
-          -target-ios-version-min 12.0 \
           -fobjc-arc \
           -framework Foundation \
           -framework UIKit \
